@@ -114,9 +114,9 @@ class WSHandler(tornado.websocket.WebSocketHandler):
         self.frame_buffer = BufferedPipe(MAX_LENGTH // MS_PER_FRAME, processor)
         # Setup the Voice Activity Detector
         self.tick = None
-        self.cli = None
+        self.id = None
         self.vad = webrtcvad.Vad()
-        self.vad.set_mode(1)  # Level of sensitivity
+        self.vad.set_mode(2)  # Level of sensitivity
     def open(self):
         info("client connected")
         # Add the connection to the list of connections
@@ -125,52 +125,42 @@ class WSHandler(tornado.websocket.WebSocketHandler):
         # Check if message is Binary or Text
         if type(message) == str:
             if self.vad.is_speech(message, 16000):
-                debug ("SPEECH from {}".format(self.cli))
+                debug ("SPEECH from {}".format(self.id))
                 self.tick = SILENCE
-                self.frame_buffer.append(message, self.cli)
+                self.frame_buffer.append(message, self.id)
             else:
-                debug("Silence from {} TICK: {}".format(self.cli, self.tick))
+                debug("Silence from {} TICK: {}".format(self.id, self.tick))
                 self.tick -= 1
                 if self.tick == 0:
-                    self.frame_buffer.process(self.cli)  # Force processing and clearing of the buffer
+                    self.frame_buffer.process(self.id)  # Force processing and clearing of the buffer
         else:
-            info(message)
-            # Here we should be extracting the meta data that was sent and attaching it to the connection object
+            debug(message)
             data = json.loads(message)
-            self.cli = data['cli']
-            conns[self.cli] = self
+            if data[u'event'] == "connect":
+                self.id = data['id']
+                conns[self.id] = self
+            elif data["event"] == "ptt_on":
+                pass
+            elif data["event"] == "ptt_off":
+                self.frame_buffer.process(self.id)
+            else:
+                info("Unknown event: {}".format(data))
             self.write_message('ok')
-
+    
+                    
     def on_close(self):
-        # Remove the connection from the list of connections
-        del conns[self.cli]
         info("client disconnected")
 
 
-class NCCOHandler(tornado.web.RequestHandler):
-    def initialize(self, host, event_url):
+class MainHandler(tornado.web.RequestHandler):
+    def initialize(self, host):
         self._host = host
-        self._event_url = event_url
-        self._template = tornado.template.Loader(".").load("ncco.json")
+        self._template = tornado.template.Loader(".").load("ws_audio.html")
     def get(self):
-        cli = self.get_argument("from", None).lstrip("+")
-        to = self.get_argument("to", None)
-        conv_uuid = self.get_argument("conversation_uuid", None)
-        self.set_header("Content-Type", 'application/json')
+        self.set_header("Content-Type", 'text/html')
         self.write(self._template.generate(
             host=self._host,
-            event_url=self._event_url,
-            lvn = to,
-            cli = cli
         ))
-        self.finish()
-
-
-class EventHandler(tornado.web.RequestHandler):
-    def post(self):
-        info(self.request.body)
-        self.set_header("Content-Type", 'text/plain')
-        self.write('ok')
         self.finish()
 
 
@@ -205,9 +195,7 @@ def main(argv=sys.argv[1:]):
         ap = argparse.ArgumentParser()
         ap.add_argument("-v", "--verbose", action="count")
         ap.add_argument("-c", "--config", default=None)
-
         args = ap.parse_args(argv)
-
         logging.basicConfig(
             level=logging.INFO if args.verbose < 1 else logging.DEBUG,
             format="%(levelname)7s %(message)s",
@@ -219,9 +207,8 @@ def main(argv=sys.argv[1:]):
         processor = Processor(config.path).process
 
         application = tornado.web.Application([
-            url(r"/ncco", NCCOHandler, dict(host=config.host, event_url=config.event_url)),
-            url(r'/socket', WSHandler, dict(processor=processor)),
-            url(r'/event', EventHandler),
+            url(r"/", MainHandler, dict(host=config.host)),
+            url(r'/socket', WSHandler, dict(processor=processor))
         ])
 
         http_server = tornado.httpserver.HTTPServer(application)
